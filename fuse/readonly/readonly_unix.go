@@ -11,9 +11,9 @@ import (
 	"syscall"
 
 	core "github.com/ipfs/go-ipfs/core"
-	ft "gx/ipfs/QmUnHNqhSB1JgzVCxL1Kz3yb4bdyB4q1Z9AD5AUBVmt3fZ/go-unixfs"
-	uio "gx/ipfs/QmUnHNqhSB1JgzVCxL1Kz3yb4bdyB4q1Z9AD5AUBVmt3fZ/go-unixfs/io"
 	path "gx/ipfs/QmVi2uUygezqaMTqs3Yzt5FcZFHJoYD4B7jQ2BELjj7ZuY/go-path"
+	ft "gx/ipfs/QmXfRerdaWXdcxdT42Qob3Lg4DnXadeg7f9oFsVbXkEaur/go-unixfs"
+	uio "gx/ipfs/QmXfRerdaWXdcxdT42Qob3Lg4DnXadeg7f9oFsVbXkEaur/go-unixfs/io"
 	mdag "gx/ipfs/QmcGt25mrjuB2kKW2zhPbXVZNHc4yoTDQ65NA8m6auP2f1/go-merkledag"
 
 	fuse "gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse"
