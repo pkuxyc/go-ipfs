@@ -7,9 +7,9 @@ import (
 	"os"
 	"reflect"
 
-	"gx/ipfs/QmWzi9E1QpPRNL7GJhNPczH9o74fPDbCkNCatSdJY6omXb/go-ipfs-cmds"
+	files "gx/ipfs/QmQkUXH7YcgPypNsKEL7X13a1HSP3VcmpLMbY817TgjTMp/go-ipfs-files"
 	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	files "gx/ipfs/QmeMTH1JMwLui2dGzn5Ecvup9NY41PqD2Md4Fx4cgk7ykr/go-ipfs-files"
+	"gx/ipfs/QmdevNYZQQnkfH8Z1kBaQLW9x4w7LGDxg5h5gMXEGimKvr/go-ipfs-cmds"
 
 	oldcmds "github.com/ipfs/go-ipfs/commands"
 )
@@ -68,7 +68,7 @@ func (r *requestWrapper) ConvertOptions() error {
 	return convertOptions(r.req)
 }
 
-func (r *requestWrapper) Files() files.File {
+func (r *requestWrapper) Files() files.Directory {
 	return r.req.Files
 }
 
@@ -122,7 +122,7 @@ func (r *requestWrapper) SetArguments(args []string) {
 	r.req.Arguments = args
 }
 
-func (r *requestWrapper) SetFiles(f files.File) {
+func (r *requestWrapper) SetFiles(f files.Directory) {
 	r.req.Files = f
 }
 
