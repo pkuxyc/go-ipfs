@@ -35,6 +35,12 @@ test_dht() {
     [ -s putted ] ||
     test_fsh cat putted
   '
+
+  test_expect_success 'put round trips' '
+    echo -n "$TEST_DHT_VALUE" >expected &&
+    ipfsi 0 dht get "$TEST_DHT_PATH" >actual &&
+    test_cmp actual expected
+  '
   
   # ipfs dht get <key>
   test_expect_success 'get with good keys' '
@@ -51,15 +57,15 @@ test_dht() {
     test_fsh cat putted
   '
   
-  test_expect_failure 'put with bad keys returns error (issue #4611)' '
-    ! ipfsi 0 dht put "foo" "bar" &&
-    ! ipfsi 0 dht put "/pk/foo" "bar" &&
-    ! ipfsi 0 dht put "/ipns/foo" "bar"
+  test_expect_success 'put with bad keys returns error (issue #4611)' '
+    test_must_fail ipfsi 0 dht put "foo" "bar" &&
+    test_must_fail ipfsi 0 dht put "/pk/foo" "bar" &&
+    test_must_fail ipfsi 0 dht put "/ipns/foo" "bar"
   '
   
-  test_expect_failure 'get with bad keys (issue #4611)' '
-    ! ipfsi 0 dht get "foo" &&
-    ! ipfsi 0 dht get "/pk/foo"
+  test_expect_success 'get with bad keys (issue #4611)' '
+    test_must_fail ipfsi 0 dht get "foo" &&
+    test_must_fail ipfsi 0 dht get "/pk/foo"
   '
   
   test_expect_success "add a ref so we can find providers for it" '
@@ -90,6 +96,15 @@ test_dht() {
 
   test_expect_success 'stop iptb' '
     iptb stop
+  '
+
+  test_expect_success "dht commands fail when offline" '
+    test_must_fail ipfsi 0 dht findprovs "$HASH" 2>err_findprovs &&
+    test_must_fail ipfsi 0 dht findpeer "$HASH" 2>err_findpeer &&
+    test_must_fail ipfsi 0 dht put "$TEST_DHT_PATH" "$TEST_DHT_VALUE" 2>err_put &&
+    test_should_contain "this command must be run in online mode" err_findprovs &&
+    test_should_contain "this command must be run in online mode" err_findpeer &&
+    test_should_contain "this command must be run in online mode" err_put
   '
 }
 

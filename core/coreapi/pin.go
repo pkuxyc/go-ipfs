@@ -4,37 +4,40 @@ import (
 	"context"
 	"fmt"
 
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	corerepo "github.com/ipfs/go-ipfs/core/corerepo"
-	bserv "gx/ipfs/QmVDTbzzTwnuBwNbJdhW3u7LoBQp46bezm9yp4z1RoEepM/go-blockservice"
-	merkledag "gx/ipfs/QmdURv6Sbob8TVW2tFFve9vcEWrSUgwPqeqnXyvYhLrkyd/go-merkledag"
-
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	offline "gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
+	bserv "github.com/ipfs/go-blockservice"
+	cid "github.com/ipfs/go-cid"
+	offline "github.com/ipfs/go-ipfs-exchange-offline"
+	merkledag "github.com/ipfs/go-merkledag"
+	coreiface "github.com/ipfs/interface-go-ipfs-core"
+	caopts "github.com/ipfs/interface-go-ipfs-core/options"
+	path "github.com/ipfs/interface-go-ipfs-core/path"
 )
 
 type PinAPI CoreAPI
 
-func (api *PinAPI) Add(ctx context.Context, p coreiface.Path, opts ...caopts.PinAddOption) error {
+func (api *PinAPI) Add(ctx context.Context, p path.Path, opts ...caopts.PinAddOption) error {
+	dagNode, err := api.core().ResolveNode(ctx, p)
+	if err != nil {
+		return fmt.Errorf("pin: %s", err)
+	}
+
 	settings, err := caopts.PinAddOptions(opts...)
 	if err != nil {
 		return err
 	}
 
-	rp, err := api.core().ResolvePath(ctx, p)
+	defer api.blockstore.PinLock().Unlock()
+
+	err = api.pinning.Pin(ctx, dagNode, settings.Recursive)
 	if err != nil {
+		return fmt.Errorf("pin: %s", err)
+	}
+
+	if err := api.provider.Provide(dagNode.Cid()); err != nil {
 		return err
 	}
 
-	defer api.node.Blockstore.PinLock().Unlock()
-
-	_, err = corerepo.Pin(api.node, api.core(), ctx, []string{rp.Cid().String()}, settings.Recursive)
-	if err != nil {
-		return err
-	}
-
-	return api.node.Pinning.Flush()
+	return api.pinning.Flush()
 }
 
 func (api *PinAPI) Ls(ctx context.Context, opts ...caopts.PinLsOption) ([]coreiface.Pin, error) {
@@ -52,16 +55,26 @@ func (api *PinAPI) Ls(ctx context.Context, opts ...caopts.PinLsOption) ([]coreif
 	return api.pinLsAll(settings.Type, ctx)
 }
 
-func (api *PinAPI) Rm(ctx context.Context, p coreiface.Path) error {
-	_, err := corerepo.Unpin(api.node, api.core(), ctx, []string{p.String()}, true)
+// Rm pin rm api
+func (api *PinAPI) Rm(ctx context.Context, p path.Path, opts ...caopts.PinRmOption) error {
+	rp, err := api.core().ResolvePath(ctx, p)
 	if err != nil {
 		return err
 	}
 
-	return api.node.Pinning.Flush()
+	settings, err := caopts.PinRmOptions(opts...)
+	if err != nil {
+		return err
+	}
+
+	if err = api.pinning.Unpin(ctx, rp.Cid(), settings.Recursive); err != nil {
+		return err
+	}
+
+	return api.pinning.Flush()
 }
 
-func (api *PinAPI) Update(ctx context.Context, from coreiface.Path, to coreiface.Path, opts ...caopts.PinUpdateOption) error {
+func (api *PinAPI) Update(ctx context.Context, from path.Path, to path.Path, opts ...caopts.PinUpdateOption) error {
 	settings, err := caopts.PinUpdateOptions(opts...)
 	if err != nil {
 		return err
@@ -77,14 +90,14 @@ func (api *PinAPI) Update(ctx context.Context, from coreiface.Path, to coreiface
 		return err
 	}
 
-	defer api.node.Blockstore.PinLock().Unlock()
+	defer api.blockstore.PinLock().Unlock()
 
-	err = api.node.Pinning.Update(ctx, fp.Cid(), tp.Cid(), settings.Unpin)
+	err = api.pinning.Update(ctx, fp.Cid(), tp.Cid(), settings.Unpin)
 	if err != nil {
 		return err
 	}
 
-	return api.node.Pinning.Flush()
+	return api.pinning.Flush()
 }
 
 type pinStatus struct {
@@ -95,7 +108,7 @@ type pinStatus struct {
 
 // BadNode is used in PinVerifyRes
 type badNode struct {
-	path coreiface.ResolvedPath
+	path path.Resolved
 	err  error
 }
 
@@ -107,7 +120,7 @@ func (s *pinStatus) BadNodes() []coreiface.BadPinNode {
 	return s.badNodes
 }
 
-func (n *badNode) Path() coreiface.ResolvedPath {
+func (n *badNode) Path() path.Resolved {
 	return n.path
 }
 
@@ -117,10 +130,10 @@ func (n *badNode) Err() error {
 
 func (api *PinAPI) Verify(ctx context.Context) (<-chan coreiface.PinStatus, error) {
 	visited := make(map[cid.Cid]*pinStatus)
-	bs := api.node.Blocks.Blockstore()
+	bs := api.blockstore
 	DAG := merkledag.NewDAGService(bserv.New(bs, offline.Exchange(bs)))
 	getLinks := merkledag.GetLinksWithDAG(DAG)
-	recPins := api.node.Pinning.RecursiveKeys()
+	recPins := api.pinning.RecursiveKeys()
 
 	var checkPin func(root cid.Cid) *pinStatus
 	checkPin = func(root cid.Cid) *pinStatus {
@@ -131,7 +144,7 @@ func (api *PinAPI) Verify(ctx context.Context) (<-chan coreiface.PinStatus, erro
 		links, err := getLinks(ctx, root)
 		if err != nil {
 			status := &pinStatus{ok: false, cid: root}
-			status.badNodes = []coreiface.BadPinNode{&badNode{path: coreiface.IpldPath(root), err: err}}
+			status.badNodes = []coreiface.BadPinNode{&badNode{path: path.IpldPath(root), err: err}}
 			visited[root] = status
 			return status
 		}
@@ -162,10 +175,10 @@ func (api *PinAPI) Verify(ctx context.Context) (<-chan coreiface.PinStatus, erro
 
 type pinInfo struct {
 	pinType string
-	path    coreiface.ResolvedPath
+	path    path.Resolved
 }
 
-func (p *pinInfo) Path() coreiface.ResolvedPath {
+func (p *pinInfo) Path() path.Resolved {
 	return p.path
 }
 
@@ -181,17 +194,17 @@ func (api *PinAPI) pinLsAll(typeStr string, ctx context.Context) ([]coreiface.Pi
 		for _, c := range keyList {
 			keys[c] = &pinInfo{
 				pinType: typeStr,
-				path:    coreiface.IpldPath(c),
+				path:    path.IpldPath(c),
 			}
 		}
 	}
 
 	if typeStr == "direct" || typeStr == "all" {
-		AddToResultKeys(api.node.Pinning.DirectKeys(), "direct")
+		AddToResultKeys(api.pinning.DirectKeys(), "direct")
 	}
 	if typeStr == "indirect" || typeStr == "all" {
 		set := cid.NewSet()
-		for _, k := range api.node.Pinning.RecursiveKeys() {
+		for _, k := range api.pinning.RecursiveKeys() {
 			err := merkledag.EnumerateChildren(ctx, merkledag.GetLinksWithDAG(api.dag), k, set.Visit)
 			if err != nil {
 				return nil, err
@@ -200,7 +213,7 @@ func (api *PinAPI) pinLsAll(typeStr string, ctx context.Context) ([]coreiface.Pi
 		AddToResultKeys(set.Keys(), "indirect")
 	}
 	if typeStr == "recursive" || typeStr == "all" {
-		AddToResultKeys(api.node.Pinning.RecursiveKeys(), "recursive")
+		AddToResultKeys(api.pinning.RecursiveKeys(), "recursive")
 	}
 
 	out := make([]coreiface.Pin, 0, len(keys))

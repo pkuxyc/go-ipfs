@@ -1,24 +1,32 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 
-	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	options "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
+	"github.com/ipfs/go-ipfs/core/commands/cmdenv"
 
-	pb "gx/ipfs/QmPtj12fdwuAqj9sBSTNUxBNu8kCGNp8b3o8yUzMm5GHpq/pb"
-	files "gx/ipfs/QmZMWMvWMVKCbHetJ4RgndbuEF1io2UpUxwQwtNjtYPzSC/go-ipfs-files"
-	cmds "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	mh "gx/ipfs/QmerPMzPk1mJVowm8KgmoknWa4yCYvvugMPsgWmDNUvDLW/go-multihash"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/go-ipfs-files"
+	coreiface "github.com/ipfs/interface-go-ipfs-core"
+	"github.com/ipfs/interface-go-ipfs-core/options"
+	mh "github.com/multiformats/go-multihash"
+	pb "gopkg.in/cheggaaa/pb.v1"
 )
 
 // ErrDepthLimitExceeded indicates that the max depth has been exceeded.
 var ErrDepthLimitExceeded = fmt.Errorf("depth limit exceeded")
+
+type AddEvent struct {
+	Name  string
+	Hash  string `json:",omitempty"`
+	Bytes int64  `json:",omitempty"`
+	Size  string `json:",omitempty"`
+}
 
 const (
 	quietOptionName       = "quiet"
@@ -27,8 +35,6 @@ const (
 	progressOptionName    = "progress"
 	trickleOptionName     = "trickle"
 	wrapOptionName        = "wrap-with-directory"
-	stdinPathName         = "stdin-name"
-	hiddenOptionName      = "hidden"
 	onlyHashOptionName    = "only-hash"
 	chunkerOptionName     = "chunker"
 	pinOptionName         = "pin"
@@ -44,7 +50,7 @@ const (
 const adderOutChanSize = 8
 
 var AddCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Add a file or directory to ipfs.",
 		ShortDescription: `
 Adds contents of <path> to ipfs. Use -r to add directories (recursively).
@@ -71,12 +77,16 @@ You can now refer to the added file in a gateway, like so:
 
 The chunker option, '-s', specifies the chunking strategy that dictates
 how to break files into blocks. Blocks with same content can
-be deduplicated. The default is a fixed block size of
+be deduplicated. Different chunking strategies will produce different
+hashes for the same file. The default is a fixed block size of
 256 * 1024 bytes, 'size-262144'. Alternatively, you can use the
-rabin chunker for content defined chunking by specifying
-rabin-[min]-[avg]-[max] (where min/avg/max refer to the resulting
-chunk sizes). Using other chunking strategies will produce
-different hashes for the same file.
+Rabin fingerprint chunker for content defined chunking by specifying
+rabin-[min]-[avg]-[max] (where min/avg/max refer to the desired
+chunk sizes in bytes), e.g. 'rabin-262144-524288-1048576'.
+
+The following examples use very small byte sizes to demonstrate the
+properties of the different chunkers on a small file. You'll likely
+want to use a 1024 times larger chunk sizes for most files.
 
   > ipfs add --chunker=size-2048 ipfs-logo.svg
   added QmafrLBfzRLV4XSH1XcaMMeaXEUhDJjmtDfsYU95TrWG87 ipfs-logo.svg
@@ -95,29 +105,30 @@ You can now check what blocks have been created by:
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.FileArg("path", true, true, "The path to a file to be added to ipfs.").EnableRecursive().EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.FileArg("path", true, true, "The path to a file to be added to ipfs.").EnableRecursive().EnableStdin(),
 	},
-	Options: []cmdkit.Option{
+	Options: []cmds.Option{
 		cmds.OptionRecursivePath, // a builtin option that allows recursive paths (-r, --recursive)
-		cmdkit.BoolOption(quietOptionName, "q", "Write minimal output."),
-		cmdkit.BoolOption(quieterOptionName, "Q", "Write only final hash."),
-		cmdkit.BoolOption(silentOptionName, "Write no output."),
-		cmdkit.BoolOption(progressOptionName, "p", "Stream progress data."),
-		cmdkit.BoolOption(trickleOptionName, "t", "Use trickle-dag format for dag generation."),
-		cmdkit.BoolOption(onlyHashOptionName, "n", "Only chunk and hash - do not write to disk."),
-		cmdkit.BoolOption(wrapOptionName, "w", "Wrap files with a directory object."),
-		cmdkit.StringOption(stdinPathName, "Assign a name if the file source is stdin."),
-		cmdkit.BoolOption(hiddenOptionName, "H", "Include files that are hidden. Only takes effect on recursive add."),
-		cmdkit.StringOption(chunkerOptionName, "s", "Chunking algorithm, size-[bytes] or rabin-[min]-[avg]-[max]").WithDefault("size-262144"),
-		cmdkit.BoolOption(pinOptionName, "Pin this object when adding.").WithDefault(true),
-		cmdkit.BoolOption(rawLeavesOptionName, "Use raw blocks for leaf nodes. (experimental)"),
-		cmdkit.BoolOption(noCopyOptionName, "Add the file using filestore. Implies raw-leaves. (experimental)"),
-		cmdkit.BoolOption(fstoreCacheOptionName, "Check the filestore for pre-existing blocks. (experimental)"),
-		cmdkit.IntOption(cidVersionOptionName, "CID version. Defaults to 0 unless an option that depends on CIDv1 is passed. (experimental)"),
-		cmdkit.StringOption(hashOptionName, "Hash function to use. Implies CIDv1 if not sha2-256. (experimental)").WithDefault("sha2-256"),
-		cmdkit.BoolOption(inlineOptionName, "Inline small blocks into CIDs. (experimental)"),
-		cmdkit.IntOption(inlineLimitOptionName, "Maximum block size to inline. (experimental)").WithDefault(32),
+		cmds.OptionDerefArgs,     // a builtin option that resolves passed in filesystem links (--dereference-args)
+		cmds.OptionStdinName,     // a builtin option that optionally allows wrapping stdin into a named file
+		cmds.OptionHidden,
+		cmds.BoolOption(quietOptionName, "q", "Write minimal output."),
+		cmds.BoolOption(quieterOptionName, "Q", "Write only final hash."),
+		cmds.BoolOption(silentOptionName, "Write no output."),
+		cmds.BoolOption(progressOptionName, "p", "Stream progress data."),
+		cmds.BoolOption(trickleOptionName, "t", "Use trickle-dag format for dag generation."),
+		cmds.BoolOption(onlyHashOptionName, "n", "Only chunk and hash - do not write to disk."),
+		cmds.BoolOption(wrapOptionName, "w", "Wrap files with a directory object."),
+		cmds.StringOption(chunkerOptionName, "s", "Chunking algorithm, size-[bytes] or rabin-[min]-[avg]-[max]").WithDefault("size-262144"),
+		cmds.BoolOption(pinOptionName, "Pin this object when adding.").WithDefault(true),
+		cmds.BoolOption(rawLeavesOptionName, "Use raw blocks for leaf nodes. (experimental)"),
+		cmds.BoolOption(noCopyOptionName, "Add the file using filestore. Implies raw-leaves. (experimental)"),
+		cmds.BoolOption(fstoreCacheOptionName, "Check the filestore for pre-existing blocks. (experimental)"),
+		cmds.IntOption(cidVersionOptionName, "CID version. Defaults to 0 unless an option that depends on CIDv1 is passed. (experimental)"),
+		cmds.StringOption(hashOptionName, "Hash function to use. Implies CIDv1 if not sha2-256. (experimental)").WithDefault("sha2-256"),
+		cmds.BoolOption(inlineOptionName, "Inline small blocks into CIDs. (experimental)"),
+		cmds.IntOption(inlineLimitOptionName, "Maximum block size to inline. (experimental)").WithDefault(32),
 	},
 	PreRun: func(req *cmds.Request, env cmds.Environment) error {
 		quiet, _ := req.Options[quietOptionName].(bool)
@@ -139,7 +150,7 @@ You can now check what blocks have been created by:
 		return nil
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
@@ -148,7 +159,6 @@ You can now check what blocks have been created by:
 		trickle, _ := req.Options[trickleOptionName].(bool)
 		wrap, _ := req.Options[wrapOptionName].(bool)
 		hash, _ := req.Options[onlyHashOptionName].(bool)
-		hidden, _ := req.Options[hiddenOptionName].(bool)
 		silent, _ := req.Options[silentOptionName].(bool)
 		chunker, _ := req.Options[chunkerOptionName].(string)
 		dopin, _ := req.Options[pinOptionName].(bool)
@@ -159,15 +169,23 @@ You can now check what blocks have been created by:
 		hashFunStr, _ := req.Options[hashOptionName].(string)
 		inline, _ := req.Options[inlineOptionName].(bool)
 		inlineLimit, _ := req.Options[inlineLimitOptionName].(int)
-		pathName, _ := req.Options[stdinPathName].(string)
-		local, _ := req.Options["local"].(bool)
 
 		hashFunCode, ok := mh.Names[strings.ToLower(hashFunStr)]
 		if !ok {
 			return fmt.Errorf("unrecognized hash function: %s", strings.ToLower(hashFunStr))
 		}
 
-		events := make(chan interface{}, adderOutChanSize)
+		enc, err := cmdenv.GetCidEncoder(req)
+		if err != nil {
+			return err
+		}
+
+		toadd := req.Files
+		if wrap {
+			toadd = files.NewSliceDirectory([]files.DirEntry{
+				files.FileEntry("", req.Files),
+			})
+		}
 
 		opts := []options.UnixfsAddOption{
 			options.Unixfs.Hash(hashFunCode),
@@ -179,17 +197,11 @@ You can now check what blocks have been created by:
 
 			options.Unixfs.Pin(dopin),
 			options.Unixfs.HashOnly(hash),
-			options.Unixfs.Local(local),
 			options.Unixfs.FsCache(fscache),
 			options.Unixfs.Nocopy(nocopy),
 
-			options.Unixfs.Wrap(wrap),
-			options.Unixfs.Hidden(hidden),
-			options.Unixfs.StdinName(pathName),
-
 			options.Unixfs.Progress(progress),
 			options.Unixfs.Silent(silent),
-			options.Unixfs.Events(events),
 		}
 
 		if cidVerSet {
@@ -204,20 +216,65 @@ You can now check what blocks have been created by:
 			opts = append(opts, options.Unixfs.Layout(options.TrickleLayout))
 		}
 
-		errCh := make(chan error)
-		go func() {
-			var err error
-			defer func() { errCh <- err }()
-			defer close(events)
-			_, err = api.Unixfs().Add(req.Context, req.Files, opts...)
-		}()
+		opts = append(opts, nil) // events option placeholder
 
-		err = res.Emit(events)
-		if err != nil {
-			return err
+		var added int
+		addit := toadd.Entries()
+		for addit.Next() {
+			_, dir := addit.Node().(files.Directory)
+			errCh := make(chan error, 1)
+			events := make(chan interface{}, adderOutChanSize)
+			opts[len(opts)-1] = options.Unixfs.Events(events)
+
+			go func() {
+				var err error
+				defer close(events)
+				_, err = api.Unixfs().Add(req.Context, addit.Node(), opts...)
+				errCh <- err
+			}()
+
+			for event := range events {
+				output, ok := event.(*coreiface.AddEvent)
+				if !ok {
+					return errors.New("unknown event type")
+				}
+
+				h := ""
+				if output.Path != nil {
+					h = enc.Encode(output.Path.Cid())
+				}
+
+				if !dir && addit.Name() != "" {
+					output.Name = addit.Name()
+				} else {
+					output.Name = path.Join(addit.Name(), output.Name)
+				}
+
+				if err := res.Emit(&AddEvent{
+					Name:  output.Name,
+					Hash:  h,
+					Bytes: output.Bytes,
+					Size:  output.Size,
+				}); err != nil {
+					return err
+				}
+			}
+
+			if err := <-errCh; err != nil {
+				return err
+			}
+			added++
 		}
 
-		return <-errCh
+		if addit.Err() != nil {
+			return addit.Err()
+		}
+
+		if added == 0 {
+			return fmt.Errorf("expected a file argument")
+		}
+
+		return nil
 	},
 	PostRun: cmds.PostRunMap{
 		cmds.CLI: func(res cmds.Response, re cmds.ResponseEmitter) error {
@@ -225,24 +282,17 @@ You can now check what blocks have been created by:
 			outChan := make(chan interface{})
 			req := res.Request()
 
-			sizeFile, ok := req.Files.(files.SizeFile)
-			if ok {
-				// Could be slow.
-				go func() {
-					size, err := sizeFile.Size()
-					if err != nil {
-						log.Warningf("error getting files size: %s", err)
-						// see comment above
-						return
-					}
+			// Could be slow.
+			go func() {
+				size, err := req.Files.Size()
+				if err != nil {
+					log.Warningf("error getting files size: %s", err)
+					// see comment above
+					return
+				}
 
-					sizeChan <- size
-				}()
-			} else {
-				// we don't need to error, the progress bar just
-				// won't know how big the files are
-				log.Warning("cannot determine size of input file")
-			}
+				sizeChan <- size
+			}()
 
 			progressBar := func(wait chan struct{}) {
 				defer close(wait)
@@ -278,7 +328,7 @@ You can now check what blocks have been created by:
 
 							break LOOP
 						}
-						output := out.(*coreiface.AddEvent)
+						output := out.(*AddEvent)
 						if len(output.Hash) > 0 {
 							lastHash = output.Hash
 							if quieter {
@@ -366,5 +416,5 @@ You can now check what blocks have been created by:
 			}
 		},
 	},
-	Type: coreiface.AddEvent{},
+	Type: AddEvent{},
 }

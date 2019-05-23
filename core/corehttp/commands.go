@@ -14,10 +14,10 @@ import (
 	"github.com/ipfs/go-ipfs/core"
 	corecommands "github.com/ipfs/go-ipfs/core/commands"
 
-	path "gx/ipfs/QmQtg7N4XjAk2ZYpBjjv8B6gQprsRekabHBCnF6i46JYKJ/go-path"
-	config "gx/ipfs/QmXctaABKwgzmQgNM4bucMJf7zJnxxvhmPM1Pw95dxUfB5/go-ipfs-config"
-	cmds "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	cmdsHttp "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds/http"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	cmdsHttp "github.com/ipfs/go-ipfs-cmds/http"
+	config "github.com/ipfs/go-ipfs-config"
+	path "github.com/ipfs/go-path"
 )
 
 var (
@@ -61,18 +61,22 @@ func addHeadersFromConfig(c *cmdsHttp.ServerConfig, nc *config.Config) {
 	if acam := nc.API.HTTPHeaders[cmdsHttp.ACAMethods]; acam != nil {
 		c.SetAllowedMethods(acam...)
 	}
-	if acac := nc.API.HTTPHeaders[cmdsHttp.ACACredentials]; acac != nil {
-		for _, v := range acac {
-			c.SetAllowCredentials(strings.ToLower(v) == "true")
-		}
+	for _, v := range nc.API.HTTPHeaders[cmdsHttp.ACACredentials] {
+		c.SetAllowCredentials(strings.ToLower(v) == "true")
 	}
 
-	c.Headers = make(map[string][]string, len(nc.API.HTTPHeaders))
+	c.Headers = make(map[string][]string, len(nc.API.HTTPHeaders)+1)
 
 	// Copy these because the config is shared and this function is called
 	// in multiple places concurrently. Updating these in-place *is* racy.
 	for h, v := range nc.API.HTTPHeaders {
-		c.Headers[h] = v
+		h = http.CanonicalHeaderKey(h)
+		switch h {
+		case cmdsHttp.ACAOrigin, cmdsHttp.ACAMethods, cmdsHttp.ACACredentials:
+			// these are handled by the CORs library.
+		default:
+			c.Headers[h] = v
+		}
 	}
 	c.Headers["Server"] = []string{"go-ipfs/" + version.CurrentVersionNumber}
 }

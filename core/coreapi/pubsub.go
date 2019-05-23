@@ -7,14 +7,14 @@ import (
 	"sync"
 	"time"
 
-	core "github.com/ipfs/go-ipfs/core"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-
-	pstore "gx/ipfs/QmQAGG1zxfePqj2t7bLxyN8AFccZ889DDR9Gn8kVLDrGZo/go-libp2p-peerstore"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	pubsub "gx/ipfs/Qmc3BYVGtLs8y3p4uVpARWyo3Xk2oCBFF1AhYUVMPWgwUK/go-libp2p-pubsub"
-	peer "gx/ipfs/QmcqU6QUDSXprb1518vYDGczrTJTyGwLG9eUa5iNX4xUtS/go-libp2p-peer"
+	cid "github.com/ipfs/go-cid"
+	coreiface "github.com/ipfs/interface-go-ipfs-core"
+	caopts "github.com/ipfs/interface-go-ipfs-core/options"
+	p2phost "github.com/libp2p/go-libp2p-host"
+	peer "github.com/libp2p/go-libp2p-peer"
+	pstore "github.com/libp2p/go-libp2p-peerstore"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	routing "github.com/libp2p/go-libp2p-routing"
 )
 
 type PubSubAPI CoreAPI
@@ -29,15 +29,17 @@ type pubSubMessage struct {
 }
 
 func (api *PubSubAPI) Ls(ctx context.Context) ([]string, error) {
-	if err := api.checkNode(); err != nil {
+	_, err := api.checkNode()
+	if err != nil {
 		return nil, err
 	}
 
-	return api.node.PubSub.GetTopics(), nil
+	return api.pubSub.GetTopics(), nil
 }
 
 func (api *PubSubAPI) Peers(ctx context.Context, opts ...caopts.PubSubPeersOption) ([]peer.ID, error) {
-	if err := api.checkNode(); err != nil {
+	_, err := api.checkNode()
+	if err != nil {
 		return nil, err
 	}
 
@@ -46,37 +48,35 @@ func (api *PubSubAPI) Peers(ctx context.Context, opts ...caopts.PubSubPeersOptio
 		return nil, err
 	}
 
-	peers := api.node.PubSub.ListPeers(settings.Topic)
-	out := make([]peer.ID, len(peers))
-
-	for i, peer := range peers {
-		out[i] = peer
-	}
-
-	return out, nil
+	return api.pubSub.ListPeers(settings.Topic), nil
 }
 
 func (api *PubSubAPI) Publish(ctx context.Context, topic string, data []byte) error {
-	if err := api.checkNode(); err != nil {
+	_, err := api.checkNode()
+	if err != nil {
 		return err
 	}
 
-	return api.node.PubSub.Publish(topic, data)
+	return api.pubSub.Publish(topic, data)
 }
 
 func (api *PubSubAPI) Subscribe(ctx context.Context, topic string, opts ...caopts.PubSubSubscribeOption) (coreiface.PubSubSubscription, error) {
 	options, err := caopts.PubSubSubscribeOptions(opts...)
-
-	if err := api.checkNode(); err != nil {
-		return nil, err
-	}
-
-	sub, err := api.node.PubSub.Subscribe(topic)
 	if err != nil {
 		return nil, err
 	}
 
-	pubctx, cancel := context.WithCancel(api.node.Context())
+	r, err := api.checkNode()
+	if err != nil {
+		return nil, err
+	}
+
+	sub, err := api.pubSub.Subscribe(topic)
+	if err != nil {
+		return nil, err
+	}
+
+	pubctx, cancel := context.WithCancel(api.nctx)
 
 	if options.Discover {
 		go func() {
@@ -86,18 +86,18 @@ func (api *PubSubAPI) Subscribe(ctx context.Context, topic string, opts ...caopt
 				return
 			}
 
-			connectToPubSubPeers(pubctx, api.node, blk.Path().Cid())
+			connectToPubSubPeers(pubctx, r, api.peerHost, blk.Path().Cid())
 		}()
 	}
 
 	return &pubSubSubscription{cancel, sub}, nil
 }
 
-func connectToPubSubPeers(ctx context.Context, n *core.IpfsNode, cid cid.Cid) {
+func connectToPubSubPeers(ctx context.Context, r routing.IpfsRouting, ph p2phost.Host, cid cid.Cid) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	provs := n.Routing.FindProvidersAsync(ctx, cid, 10)
+	provs := r.FindProvidersAsync(ctx, cid, 10)
 	var wg sync.WaitGroup
 	for p := range provs {
 		wg.Add(1)
@@ -105,7 +105,7 @@ func connectToPubSubPeers(ctx context.Context, n *core.IpfsNode, cid cid.Cid) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(ctx, time.Second*10)
 			defer cancel()
-			err := n.PeerHost.Connect(ctx, pi)
+			err := ph.Connect(ctx, pi)
 			if err != nil {
 				log.Info("pubsub discover: ", err)
 				return
@@ -117,16 +117,17 @@ func connectToPubSubPeers(ctx context.Context, n *core.IpfsNode, cid cid.Cid) {
 	wg.Wait()
 }
 
-func (api *PubSubAPI) checkNode() error {
-	if !api.node.OnlineMode() {
-		return coreiface.ErrOffline
+func (api *PubSubAPI) checkNode() (routing.IpfsRouting, error) {
+	if api.pubSub == nil {
+		return nil, errors.New("experimental pubsub feature not enabled. Run daemon with --enable-pubsub-experiment to use.")
 	}
 
-	if api.node.PubSub == nil {
-		return errors.New("experimental pubsub feature not enabled. Run daemon with --enable-pubsub-experiment to use.")
+	err := api.checkOnline(false)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil
+	return api.routing, nil
 }
 
 func (sub *pubSubSubscription) Close() error {

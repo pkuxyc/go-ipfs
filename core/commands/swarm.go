@@ -1,27 +1,35 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"path"
 	"sort"
+	"sync"
+	"time"
 
 	commands "github.com/ipfs/go-ipfs/commands"
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 	repo "github.com/ipfs/go-ipfs/repo"
 	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
 
-	pstore "gx/ipfs/QmQAGG1zxfePqj2t7bLxyN8AFccZ889DDR9Gn8kVLDrGZo/go-libp2p-peerstore"
-	swarm "gx/ipfs/QmQrYHkcGprZBUFnRigeiZFkaFDBHtmRhDdPpSiiUTRNwv/go-libp2p-swarm"
-	ma "gx/ipfs/QmRKLtwMw131aK7ugC3G7ybpumMz78YrJe5dzneyindvG1/go-multiaddr"
-	mafilter "gx/ipfs/QmSMZwvs3n4GBikZ7hKzT17c3bk65FmyZo2JqtJ16swqCv/multiaddr-filter"
-	iaddr "gx/ipfs/QmUSE3APe1pMFVsUBZUZaKQKERiPteCWvTAERtVQmtXzgE/go-ipfs-addr"
-	config "gx/ipfs/QmXctaABKwgzmQgNM4bucMJf7zJnxxvhmPM1Pw95dxUfB5/go-ipfs-config"
-	cmds "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	peer "gx/ipfs/QmcqU6QUDSXprb1518vYDGczrTJTyGwLG9eUa5iNX4xUtS/go-libp2p-peer"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	inet "gx/ipfs/QmenvQQy4bFGSiHJUGupVmCRHfetg5rH3vTp9Z2f6v2KXR/go-libp2p-net"
+	iaddr "github.com/ipfs/go-ipfs-addr"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	config "github.com/ipfs/go-ipfs-config"
+	inet "github.com/libp2p/go-libp2p-net"
+	peer "github.com/libp2p/go-libp2p-peer"
+	pstore "github.com/libp2p/go-libp2p-peerstore"
+	swarm "github.com/libp2p/go-libp2p-swarm"
+	mafilter "github.com/libp2p/go-maddr-filter"
+	ma "github.com/multiformats/go-multiaddr"
+	madns "github.com/multiformats/go-multiaddr-dns"
+	mamask "github.com/whyrusleeping/multiaddr-filter"
+)
+
+const (
+	dnsResolveTimeout = 10 * time.Second
 )
 
 type stringList struct {
@@ -33,7 +41,7 @@ type addrMap struct {
 }
 
 var SwarmCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Interact with the swarm.",
 		ShortDescription: `
 'ipfs swarm' is a tool to manipulate the network swarm. The swarm is the
@@ -58,20 +66,20 @@ const (
 )
 
 var swarmPeersCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List peers with open connections.",
 		ShortDescription: `
 'ipfs swarm peers' lists the set of peers this node is connected to.
 `,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(swarmVerboseOptionName, "v", "display all extra information"),
-		cmdkit.BoolOption(swarmStreamsOptionName, "Also list information about open streams for each peer"),
-		cmdkit.BoolOption(swarmLatencyOptionName, "Also list information about latency to each peer"),
-		cmdkit.BoolOption(swarmDirectionOptionName, "Also list information about the direction of connection"),
+	Options: []cmds.Option{
+		cmds.BoolOption(swarmVerboseOptionName, "v", "display all extra information"),
+		cmds.BoolOption(swarmStreamsOptionName, "Also list information about open streams for each peer"),
+		cmds.BoolOption(swarmLatencyOptionName, "Also list information about latency to each peer"),
+		cmds.BoolOption(swarmDirectionOptionName, "Also list information about the direction of connection"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
@@ -210,7 +218,7 @@ func directionString(d inet.Direction) string {
 }
 
 var swarmAddrsCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List known addresses. Useful for debugging.",
 		ShortDescription: `
 'ipfs swarm addrs' lists all addresses this node is aware of.
@@ -221,7 +229,7 @@ var swarmAddrsCmd = &cmds.Command{
 		"listen": swarmAddrsListenCmd,
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
@@ -248,7 +256,7 @@ var swarmAddrsCmd = &cmds.Command{
 			for p := range am.Addrs {
 				ids = append(ids, p)
 			}
-			sort.Sort(sort.StringSlice(ids))
+			sort.Strings(ids)
 
 			for _, p := range ids {
 				paddrs := am.Addrs[p]
@@ -265,17 +273,17 @@ var swarmAddrsCmd = &cmds.Command{
 }
 
 var swarmAddrsLocalCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List local addresses.",
 		ShortDescription: `
 'ipfs swarm addrs local' lists all local listening addresses announced to the network.
 `,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption("id", "Show peer ID in addresses."),
+	Options: []cmds.Option{
+		cmds.BoolOption("id", "Show peer ID in addresses."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
@@ -299,7 +307,7 @@ var swarmAddrsLocalCmd = &cmds.Command{
 			}
 			addrs = append(addrs, saddr)
 		}
-		sort.Sort(sort.StringSlice(addrs))
+		sort.Strings(addrs)
 		return cmds.EmitOnce(res, &stringList{addrs})
 	},
 	Type: stringList{},
@@ -309,14 +317,14 @@ var swarmAddrsLocalCmd = &cmds.Command{
 }
 
 var swarmAddrsListenCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List interface listening addresses.",
 		ShortDescription: `
 'ipfs swarm addrs listen' lists all interface addresses the node is listening on.
 `,
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
@@ -330,7 +338,7 @@ var swarmAddrsListenCmd = &cmds.Command{
 		for _, addr := range maddrs {
 			addrs = append(addrs, addr.String())
 		}
-		sort.Sort(sort.StringSlice(addrs))
+		sort.Strings(addrs)
 
 		return cmds.EmitOnce(res, &stringList{addrs})
 	},
@@ -341,7 +349,7 @@ var swarmAddrsListenCmd = &cmds.Command{
 }
 
 var swarmConnectCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Open connection to a given address.",
 		ShortDescription: `
 'ipfs swarm connect' opens a new direct connection to a peer address.
@@ -351,18 +359,18 @@ The address format is an IPFS multiaddr:
 ipfs swarm connect /ip4/104.131.131.82/tcp/4001/ipfs/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("address", true, true, "Address of peer to connect to.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("address", true, true, "Address of peer to connect to.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
 
 		addrs := req.Arguments
 
-		pis, err := peersWithAddresses(addrs)
+		pis, err := peersWithAddresses(req.Context, addrs)
 		if err != nil {
 			return err
 		}
@@ -387,7 +395,7 @@ ipfs swarm connect /ip4/104.131.131.82/tcp/4001/ipfs/QmaCpDMGvV2BGHeYERUEnRQAwe3
 }
 
 var swarmDisconnectCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Close connection to a given address.",
 		ShortDescription: `
 'ipfs swarm disconnect' closes a connection to a peer address. The address
@@ -399,11 +407,11 @@ The disconnect is not permanent; if ipfs needs to talk to that address later,
 it will reconnect.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("address", true, true, "Address of peer to disconnect from.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("address", true, true, "Address of peer to disconnect from.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env)
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
 			return err
 		}
@@ -444,10 +452,29 @@ func parseAddresses(addrs []string) (iaddrs []iaddr.IPFSAddr, err error) {
 	return
 }
 
+// parseMultiaddrs is a function that takes in a slice of peer multiaddr
+// and returns slices of multiaddrs and peerids
+func parseMultiaddrs(maddrs []ma.Multiaddr) (iaddrs []iaddr.IPFSAddr, err error) {
+	iaddrs = make([]iaddr.IPFSAddr, len(maddrs))
+	for i, maddr := range maddrs {
+		iaddrs[i], err = iaddr.ParseMultiaddr(maddr)
+		if err != nil {
+			return nil, cmds.ClientError("invalid peer address: " + err.Error())
+		}
+	}
+	return
+}
+
 // peersWithAddresses is a function that takes in a slice of string peer addresses
 // (multiaddr + peerid) and returns a slice of properly constructed peers
-func peersWithAddresses(addrs []string) ([]pstore.PeerInfo, error) {
-	iaddrs, err := parseAddresses(addrs)
+func peersWithAddresses(ctx context.Context, addrs []string) ([]pstore.PeerInfo, error) {
+	// resolve addresses
+	maddrs, err := resolveAddresses(ctx, addrs)
+	if err != nil {
+		return nil, err
+	}
+
+	iaddrs, err := parseMultiaddrs(maddrs)
 	if err != nil {
 		return nil, err
 	}
@@ -472,8 +499,69 @@ func peersWithAddresses(addrs []string) ([]pstore.PeerInfo, error) {
 	return pis, nil
 }
 
+// resolveAddresses resolves addresses parallelly
+func resolveAddresses(ctx context.Context, addrs []string) ([]ma.Multiaddr, error) {
+	ctx, cancel := context.WithTimeout(ctx, dnsResolveTimeout)
+	defer cancel()
+
+	var maddrs []ma.Multiaddr
+	var wg sync.WaitGroup
+	resolveErrC := make(chan error, len(addrs))
+
+	maddrC := make(chan ma.Multiaddr)
+
+	for _, addr := range addrs {
+		maddr, err := ma.NewMultiaddr(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		// check whether address ends in `ipfs/Qm...`
+		if _, last := ma.SplitLast(maddr); last.Protocol().Code == ma.P_IPFS {
+			maddrs = append(maddrs, maddr)
+			continue
+		}
+		wg.Add(1)
+		go func(maddr ma.Multiaddr) {
+			defer wg.Done()
+			raddrs, err := madns.Resolve(ctx, maddr)
+			if err != nil {
+				resolveErrC <- err
+				return
+			}
+			// filter out addresses that still doesn't end in `ipfs/Qm...`
+			found := 0
+			for _, raddr := range raddrs {
+				if _, last := ma.SplitLast(raddr); last.Protocol().Code == ma.P_IPFS {
+					maddrC <- raddr
+					found++
+				}
+			}
+			if found == 0 {
+				resolveErrC <- fmt.Errorf("found no ipfs peers at %s", maddr)
+			}
+		}(maddr)
+	}
+	go func() {
+		wg.Wait()
+		close(maddrC)
+	}()
+
+	for maddr := range maddrC {
+		maddrs = append(maddrs, maddr)
+	}
+
+	select {
+	case err := <-resolveErrC:
+		return nil, err
+	default:
+	}
+
+	return maddrs, nil
+}
+
 var swarmFiltersCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Manipulate address filters.",
 		ShortDescription: `
 'ipfs swarm filters' will list out currently applied filters. Its subcommands
@@ -512,8 +600,8 @@ Filters default to those specified under the "Swarm.AddrFilters" config key.
 		}
 
 		var output []string
-		for _, f := range swrm.Filters.Filters() {
-			s, err := mafilter.ConvertIPNet(f)
+		for _, f := range swrm.Filters.FiltersForAction(mafilter.ActionDeny) {
+			s, err := mamask.ConvertIPNet(&f)
 			if err != nil {
 				return err
 			}
@@ -528,7 +616,7 @@ Filters default to those specified under the "Swarm.AddrFilters" config key.
 }
 
 var swarmFiltersAddCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Add an address filter.",
 		ShortDescription: `
 'ipfs swarm filters add' will add an address filter to the daemons swarm.
@@ -536,8 +624,8 @@ Filters applied this way will not persist daemon reboots, to achieve that,
 add your filters to the ipfs config file.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("address", true, true, "Multiaddr to filter.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("address", true, true, "Multiaddr to filter.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		n, err := cmdenv.GetNode(env)
@@ -570,12 +658,12 @@ add your filters to the ipfs config file.
 		}
 
 		for _, arg := range req.Arguments {
-			mask, err := mafilter.NewMask(arg)
+			mask, err := mamask.NewMask(arg)
 			if err != nil {
 				return err
 			}
 
-			swrm.Filters.AddDialFilter(mask)
+			swrm.Filters.AddFilter(*mask, mafilter.ActionDeny)
 		}
 
 		added, err := filtersAdd(r, cfg, req.Arguments)
@@ -592,7 +680,7 @@ add your filters to the ipfs config file.
 }
 
 var swarmFiltersRmCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Remove an address filter.",
 		ShortDescription: `
 'ipfs swarm filters rm' will remove an address filter from the daemons swarm.
@@ -600,8 +688,8 @@ Filters removed this way will not persist daemon reboots, to achieve that,
 remove your filters from the ipfs config file.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("address", true, true, "Multiaddr filter to remove.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("address", true, true, "Multiaddr filter to remove.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		n, err := cmdenv.GetNode(env)
@@ -629,9 +717,9 @@ remove your filters from the ipfs config file.
 		}
 
 		if req.Arguments[0] == "all" || req.Arguments[0] == "*" {
-			fs := swrm.Filters.Filters()
+			fs := swrm.Filters.FiltersForAction(mafilter.ActionDeny)
 			for _, f := range fs {
-				swrm.Filters.Remove(f)
+				swrm.Filters.RemoveLiteral(f)
 			}
 
 			removed, err := filtersRemoveAll(r, cfg)
@@ -643,12 +731,12 @@ remove your filters from the ipfs config file.
 		}
 
 		for _, arg := range req.Arguments {
-			mask, err := mafilter.NewMask(arg)
+			mask, err := mamask.NewMask(arg)
 			if err != nil {
 				return err
 			}
 
-			swrm.Filters.Remove(mask)
+			swrm.Filters.RemoveLiteral(*mask)
 		}
 
 		removed, err := filtersRemove(r, cfg, req.Arguments)

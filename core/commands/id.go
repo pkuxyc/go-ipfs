@@ -11,13 +11,12 @@ import (
 	core "github.com/ipfs/go-ipfs/core"
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 
-	ic "gx/ipfs/QmNiJiXwWE3kRhZrC5ej3kSjWHm337pYfhjLGSCDNKJP2s/go-libp2p-crypto"
-	pstore "gx/ipfs/QmQAGG1zxfePqj2t7bLxyN8AFccZ889DDR9Gn8kVLDrGZo/go-libp2p-peerstore"
-	identify "gx/ipfs/QmVvV8JQmmqPCwXAaesWJPheUiEFQJ9HWRhWhuFuxVQxpR/go-libp2p/p2p/protocol/identify"
-	kb "gx/ipfs/QmXjtHE9qLp328PGkWhvEp2bqiewMSFvjas9bktfmc7ka8/go-libp2p-kbucket"
-	cmds "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	"gx/ipfs/QmcqU6QUDSXprb1518vYDGczrTJTyGwLG9eUa5iNX4xUtS/go-libp2p-peer"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	ic "github.com/libp2p/go-libp2p-crypto"
+	kb "github.com/libp2p/go-libp2p-kbucket"
+	peer "github.com/libp2p/go-libp2p-peer"
+	pstore "github.com/libp2p/go-libp2p-peerstore"
+	identify "github.com/libp2p/go-libp2p/p2p/protocol/identify"
 )
 
 const offlineIdErrorMessage = `'ipfs id' currently cannot query information on remote
@@ -42,7 +41,7 @@ const (
 )
 
 var IDCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Show ipfs node id info.",
 		ShortDescription: `
 Prints out information about the specified peer.
@@ -60,11 +59,11 @@ EXAMPLE:
     ipfs id Qmece2RkXhsKe5CRooNisBTh4SK119KrXXGmoK6V3kb8aH -f="<addrs>\n"
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("peerid", false, false, "Peer.ID of node to look up."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("peerid", false, false, "Peer.ID of node to look up."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(formatOptionName, "f", "Optional output format."),
+	Options: []cmds.Option{
+		cmds.StringOption(formatOptionName, "f", "Optional output format."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		n, err := cmdenv.GetNode(env)
@@ -92,7 +91,7 @@ EXAMPLE:
 		}
 
 		// TODO handle offline mode with polymorphism instead of conditionals
-		if !n.OnlineMode() {
+		if !n.IsOnline {
 			return errors.New(offlineIdErrorMessage)
 		}
 
@@ -175,12 +174,6 @@ func printPeer(ps pstore.Peerstore, p peer.ID) (interface{}, error) {
 func printSelf(node *core.IpfsNode) (interface{}, error) {
 	info := new(IdOutput)
 	info.ID = node.Identity.Pretty()
-
-	if node.PrivateKey == nil {
-		if err := node.LoadPrivateKey(); err != nil {
-			return nil, err
-		}
-	}
 
 	pk := node.PrivateKey.GetPublic()
 	pkb, err := ic.MarshalPublicKey(pk)

@@ -3,31 +3,31 @@ package commands
 import (
 	"fmt"
 	"io"
-	"net/http"
+	"net/url"
 
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 	filestore "github.com/ipfs/go-ipfs/filestore"
 
-	chunk "gx/ipfs/QmR4QQVkBZsZENRjYFVi8dEtPL3daZRNKk24m4r6WKJHNm/go-ipfs-chunker"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	balanced "gx/ipfs/QmXAFxWtAB9YAMzMy9op6m95hWYu2CC5rmTsijkYL12Kvu/go-unixfs/importer/balanced"
-	ihelper "gx/ipfs/QmXAFxWtAB9YAMzMy9op6m95hWYu2CC5rmTsijkYL12Kvu/go-unixfs/importer/helpers"
-	trickle "gx/ipfs/QmXAFxWtAB9YAMzMy9op6m95hWYu2CC5rmTsijkYL12Kvu/go-unixfs/importer/trickle"
-	cmds "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	mh "gx/ipfs/QmerPMzPk1mJVowm8KgmoknWa4yCYvvugMPsgWmDNUvDLW/go-multihash"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	files "github.com/ipfs/go-ipfs-files"
+	"github.com/ipfs/interface-go-ipfs-core/options"
 )
 
 var urlStoreCmd = &cmds.Command{
+	Helptext: cmds.HelpText{
+		Tagline: "Interact with urlstore.",
+	},
 	Subcommands: map[string]*cmds.Command{
 		"add": urlAdd,
 	},
 }
 
 var urlAdd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Add URL via urlstore.",
 		LongDescription: `
+DEPRECATED: Use 'ipfs add --nocopy --cid-version=1 URL'.
+
 Add URLs to ipfs without storing the data locally.
 
 The URL provided must be stable and ideally on a web server under your
@@ -35,81 +35,64 @@ control.
 
 The file is added using raw-leaves but otherwise using the default
 settings for 'ipfs add'.
-
-The file is not pinned, so this command should be followed by an 'ipfs
-pin add'.
-
-This command is considered temporary until a better solution can be
-found.  It may disappear or the semantics can change at any
-time.
 `,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(trickleOptionName, "t", "Use trickle-dag format for dag generation."),
+	Options: []cmds.Option{
+		cmds.BoolOption(trickleOptionName, "t", "Use trickle-dag format for dag generation."),
+		cmds.BoolOption(pinOptionName, "Pin this object when adding.").WithDefault(true),
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("url", true, false, "URL to add to IPFS"),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("url", true, false, "URL to add to IPFS"),
 	},
 	Type: &BlockStat{},
 
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		url := req.Arguments[0]
-		n, err := cmdenv.GetNode(env)
+		log.Error("The 'ipfs urlstore' command is deprecated, please use 'ipfs add --nocopy --cid-version=1")
+
+		urlString := req.Arguments[0]
+		if !filestore.IsURL(req.Arguments[0]) {
+			return fmt.Errorf("unsupported url syntax: %s", urlString)
+		}
+
+		url, err := url.Parse(urlString)
 		if err != nil {
 			return err
 		}
 
-		if !filestore.IsURL(url) {
-			return fmt.Errorf("unsupported url syntax: %s", url)
-		}
-
-		cfg, err := n.Repo.Config()
+		enc, err := cmdenv.GetCidEncoder(req)
 		if err != nil {
 			return err
 		}
 
-		if !cfg.Experimental.UrlstoreEnabled {
-			return filestore.ErrUrlstoreNotEnabled
+		api, err := cmdenv.GetApi(env, req)
+		if err != nil {
+			return err
 		}
 
 		useTrickledag, _ := req.Options[trickleOptionName].(bool)
+		dopin, _ := req.Options[pinOptionName].(bool)
 
-		hreq, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return err
+		opts := []options.UnixfsAddOption{
+			options.Unixfs.Pin(dopin),
+			options.Unixfs.CidVersion(1),
+			options.Unixfs.RawLeaves(true),
+			options.Unixfs.Nocopy(true),
 		}
 
-		hres, err := http.DefaultClient.Do(hreq)
-		if err != nil {
-			return err
-		}
-		if hres.StatusCode != http.StatusOK {
-			return fmt.Errorf("expected code 200, got: %d", hres.StatusCode)
-		}
-
-		chk := chunk.NewSizeSplitter(hres.Body, chunk.DefaultBlockSize)
-		prefix := cid.NewPrefixV1(cid.DagProtobuf, mh.SHA2_256)
-		dbp := &ihelper.DagBuilderParams{
-			Dagserv:    n.DAG,
-			RawLeaves:  true,
-			Maxlinks:   ihelper.DefaultLinksPerBlock,
-			NoCopy:     true,
-			CidBuilder: &prefix,
-			URL:        url,
-		}
-
-		layout := balanced.Layout
 		if useTrickledag {
-			layout = trickle.Layout
+			opts = append(opts, options.Unixfs.Layout(options.TrickleLayout))
 		}
-		root, err := layout(dbp.New(chk))
+
+		file := files.NewWebFile(url)
+
+		path, err := api.Unixfs().Add(req.Context, file, opts...)
 		if err != nil {
 			return err
 		}
-
+		size, _ := file.Size()
 		return cmds.EmitOnce(res, &BlockStat{
-			Key:  root.Cid().String(),
-			Size: int(hres.ContentLength),
+			Key:  enc.Encode(path.Cid()),
+			Size: int(size),
 		})
 	},
 	Encoders: cmds.EncoderMap{
